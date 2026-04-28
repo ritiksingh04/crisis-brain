@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Cases: anyone can create (public SOS), only authenticated staff can update/delete
+    match /cases/{caseId} {
+      allow read:   if true;
+      allow create: if true;
+      allow update, delete: if request.auth != null;
+    }
+
+    // Ambulances: read by anyone, write by authenticated staff only
+    match /ambulances/{ambId} {
+      allow read:  if true;
+      allow write: if request.auth != null;
+    }
+
+    // Staff profiles: only the owner can read/write their own doc
+    match /staff/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Call signaling rooms (WebRTC) — short-lived, open access
+    match /calls/{roomId} {
+      allow read, write: if true;
+    }
+  }
+}
