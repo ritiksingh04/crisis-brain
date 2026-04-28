@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# crisis-brain
-=======
 # CrisisBrain — Complete Setup Guide
 
 ## Project Structure
