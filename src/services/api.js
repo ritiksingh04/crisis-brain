@@ -3,6 +3,7 @@
 export const MAPS_KEY = 'AIzaSyAudspkLbSUoFQsm8rAm6toV2BHEL-fBwk';
 const BACKEND = process.env.REACT_APP_BACKEND_URL || '';
 
+console.log("BACKEND =", BACKEND);
 // ─── fetch with hard timeout ──────────────────────────────────────────────────
 async function fetchWithTimeout(url, opts = {}, ms = 4000) {
   const ctrl = new AbortController();
@@ -52,31 +53,55 @@ function nearestAmbulance(ambulances, lat, lng) {
 }
 
 // ─── TRIAGE — backend → local fallback ───────────────────────────────────────
-export async function triageCase({ description, severity, imageBase64, lat, lng }) {
-  if (BACKEND) {
-    try {
-      const r = await fetchWithTimeout(`${BACKEND}/triage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-  case_id: `CB-${Date.now()}`,
+export async function triageCase({
   description,
   severity,
-  image_base64: imageBase64,
+  imageBase64,
   lat,
   lng
-})
-      }, 4000);  // ← 4 s hard timeout, never hangs UI
-      if (r.ok) {
-        const data = await r.json();
-        return { ...data, source: data.source || 'backend' };
-      }
-    } catch (e) {
-      console.warn('[Triage] backend unreachable, using local:', e.message);
+}) {
+  console.log("BACKEND =", BACKEND);
+
+  try {
+    const r = await fetchWithTimeout(`${BACKEND}/triage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        case_id: `CB-${Date.now()}`,
+        description,
+        severity,
+        image_base64: imageBase64 || "",
+        lat,
+        lng
+      })
+    }, 4000);
+
+    console.log("status =", r.status);
+    console.log("ok =", r.ok);
+
+    const text = await r.text();
+
+    console.log("raw response =", text);
+
+    if (!r.ok) {
+      return localScore(description, severity);
     }
+
+    const data = JSON.parse(text);
+
+    console.log("parsed =", data);
+
+    return {
+      ...data,
+      source: "backend"
+    };
+
+  } catch (e) {
+    console.error("TRIAGE ERROR:", e);
+    return localScore(description, severity);
   }
-  // Instant local fallback — guaranteed result, 0 ms wait
-  return localScore(description, severity);
 }
 
 // ─── DISPATCH — Distance Matrix → straight-line fallback ─────────────────────

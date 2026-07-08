@@ -49,13 +49,16 @@ OHIhfhV0/1Ru7Rj4FGT1pmHV
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 _tok: dict = {"v": None, "exp": 0}
 
-class TriageReq(BaseModel):
+from pydantic import BaseModel
+from typing import Optional
+
+class TriageRequest(BaseModel):
     case_id: str
     description: str
     severity: str
-    image_base64: str = ""
-    lat: float
-    lng: float
+    image_base64: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 # Incident model for simple incident creation
 class Incident(BaseModel):
@@ -103,7 +106,7 @@ def _local_nlp(text, severity):
     return sc,sv,kw[:5],f"{PF[sv]} Indicators: {', '.join(kw[:3]) or 'general emergency'}."
 
 @app.post("/triage")
-async def triage(req: TriageReq):
+async def triage(req:TriageRequest):
     vis_labels=[]; vis_bonus=0; sources=[]
     if req.image_base64:
         try:
