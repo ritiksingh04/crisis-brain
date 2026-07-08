@@ -58,7 +58,14 @@ export async function triageCase({ description, severity, imageBase64, lat, lng 
       const r = await fetchWithTimeout(`${BACKEND}/triage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description, severity, image_base64: imageBase64, lat, lng })
+        body: JSON.stringify({
+  case_id: `CB-${Date.now()}`,
+  description,
+  severity,
+  image_base64: imageBase64,
+  lat,
+  lng
+})
       }, 4000);  // ← 4 s hard timeout, never hangs UI
       if (r.ok) {
         const data = await r.json();

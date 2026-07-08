@@ -1,1 +1,8 @@
 node_modules
+backend/serviceAccountKey.json
+.env
+backend/.env
+backend/serviceAccountKey.json
+__pycache__/
+*.pyc
+*.pt

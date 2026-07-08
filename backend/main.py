@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
+from datetime import datetime
+from firebase.firebase_config import db
 
 app = FastAPI(title="CrisisBrain API", version="3.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -48,17 +50,23 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 _tok: dict = {"v": None, "exp": 0}
 
 class TriageReq(BaseModel):
+    case_id: str
     description: str
-    severity: str = "medium"
-    image_base64: Optional[str] = None
-    lat: Optional[float] = None
-    lng: Optional[float] = None
+    severity: str
+    image_base64: str = ""
+    lat: float
+    lng: float
+
+# Incident model for simple incident creation
+class Incident(BaseModel):
+    description: str
+    lat: float
+    lng: float
 
 class DispatchReq(BaseModel):
     case_id: str
     case_lat: float
     case_lng: float
-    ambulances: List[dict]
 
 @app.get("/")
 @app.get("/health")
@@ -116,52 +124,196 @@ async def triage(req: TriageReq):
     sources.append("local_nlp")
     base={"critical":75,"high":55,"medium":35}.get(req.severity,40)
     final=min(99,max(10,int(base+(sc-base)*0.6+vis_bonus*0.4)))
+
     sv="critical" if final>=80 else ("high" if final>=55 else "medium")
+
+    # Update case with triage summary
+    try:
+        db.collection("cases").document(req.case_id).update({
+            "priority_score": final,
+            "severity": sv,
+            "victim": {
+                "ai_assessment": assess
+            },
+            "keywords": kw,
+            "status": "triaged"
+        })
+    except Exception as e:
+        print(f"[Firestore triage update] {e}")
+
     vis_n=f" Visual: {', '.join(vis_labels[:3])}." if vis_labels else ""
-    return {"score":final,"severity":sv,"ai_assessment":assess+vis_n,"keywords":kw,"vision_labels":vis_labels,"source":"+".join(sources)}
+
+    result = {
+        "score": final,
+        "severity": sv,
+        "ai_assessment": assess + vis_n,
+        "keywords": kw,
+        "vision_labels": vis_labels,
+        "source": "+".join(sources)
+    }
+
+    # Save to Firestore — update the existing case instead of creating a new doc
+    try:
+        db.collection("cases").document(req.case_id).update({
+            "description": req.description,
+            "input_severity": req.severity,
+            "priority_score": final,
+            "final_score": final,
+            "final_severity": sv,
+            "ai_assessment": assess + vis_n,
+            "keywords": kw,
+            "vision_labels": vis_labels,
+            "lat": req.lat,
+            "lng": req.lng,
+            "status": "triaged",
+            "triaged_at": datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        print(f"[Firestore save] {e}")
+
+    result["case_id"] = req.case_id
+
+    return result
 
 @app.post("/dispatch")
 async def dispatch(req: DispatchReq):
-    avail=[a for a in req.ambulances if not a.get("busy")]
-    if not avail: return {"ok":False,"error":"no_ambulances_available"}
+    # Load available ambulances from Firestore instead of receiving them in the request
+    try:
+        docs = db.collection("ambulances").where("busy", "==", False).get()
+        avail = []
+        for d in docs:
+            a = d.to_dict() or {}
+            a["id"] = d.id
+            avail.append(a)
+    except Exception as e:
+        print(f"[Firestore ambulances] {e}")
+        return {"ok": False, "error": "ambulance_lookup_failed"}
+
+    if not avail:
+        return {"ok": False, "error": "no_ambulances_available"}
+
+    # Try distance matrix + directions if MAPS_KEY available
     if MAPS_KEY:
         try:
-            origins="|".join(f"{a['lat']},{a['lng']}" for a in avail)
+            origins = "|".join(f"{a['lat']},{a['lng']}" for a in avail)
             async with httpx.AsyncClient(timeout=6) as c:
-                r=await c.get(f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={origins}&destinations={req.case_lat},{req.case_lng}&mode=driving&key={MAPS_KEY}")
+                r = await c.get(
+                    f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={origins}&destinations={req.case_lat},{req.case_lng}&mode=driving&key={MAPS_KEY}"
+                )
                 r.raise_for_status()
-            bi,bt=0,float("inf")
-            for i,row in enumerate(r.json().get("rows",[])):
-                el=row["elements"][0]
-                if el.get("status")=="OK" and el["duration"]["value"]<bt:
-                    bt=el["duration"]["value"]; bi=i
-            best=avail[bi]; route=None
+            bi, bt = 0, float("inf")
+            for i, row in enumerate(r.json().get("rows", [])):
+                el = row["elements"][0]
+                if el.get("status") == "OK" and el["duration"]["value"] < bt:
+                    bt = el["duration"]["value"]
+                    bi = i
+            best = avail[bi]
+            route = None
             try:
                 async with httpx.AsyncClient(timeout=6) as c:
-                    dr=await c.get(f"https://maps.googleapis.com/maps/api/directions/json?origin={best['lat']},{best['lng']}&destination={req.case_lat},{req.case_lng}&mode=driving&key={MAPS_KEY}")
-                    dr.raise_for_status(); routes=dr.json().get("routes",[])
+                    dr = await c.get(
+                        f"https://maps.googleapis.com/maps/api/directions/json?origin={best['lat']},{best['lng']}&destination={req.case_lat},{req.case_lng}&mode=driving&key={MAPS_KEY}"
+                    )
+                    dr.raise_for_status()
+                    routes = dr.json().get("routes", [])
                 if routes:
-                    leg=routes[0]["legs"][0]
-                    route={"polyline":routes[0]["overview_polyline"]["points"],"distance":leg["distance"]["text"],"duration":leg["duration"]["text"]}
-            except: pass
-            return {"ok":True,"amb_id":best["id"],"eta_sec":bt,"eta_text":f"{math.ceil(bt/60)} min","route":route,"source":"distance_matrix"}
+                    leg = routes[0]["legs"][0]
+                    route = {
+                        "polyline": routes[0]["overview_polyline"]["points"],
+                        "distance": leg["distance"]["text"],
+                        "duration": leg["duration"]["text"],
+                    }
+            except Exception:
+                pass
+
+            # Record dispatch assignment in Firestore
+            best_amb = best
+            eta_sec = bt if bt is not None else None
+            eta_text = f"{math.ceil(bt/60)} min" if bt is not None else None
+            try:
+                print("Updating case:", req.case_id)
+                db.collection("cases").document(req.case_id).update({
+                    "dispatch": {
+                        "ambulance_id": best_amb["id"],
+                        "eta": eta_sec,
+                        "assigned_at": datetime.utcnow().isoformat()
+                    },
+                    "status": "dispatched"
+                })
+                print("Case updated successfully")
+            except Exception as e:
+                print(f"[Firestore dispatch update] {e}")
+
+            return {"ok": True, "amb_id": best["id"], "eta_sec": bt, "eta_text": eta_text, "route": route, "source": "distance_matrix"}
         except Exception as e:
             print(f"[Dispatch] {e}")
-    best=min(avail,key=lambda a:math.hypot((a["lat"]-req.case_lat)*111,(a["lng"]-req.case_lng)*111))
-    d=math.hypot((best["lat"]-req.case_lat)*111,(best["lng"]-req.case_lng)*111)
-    eta=max(3,round(d/0.45))
-    return {"ok":True,"amb_id":best["id"],"eta_sec":eta*60,"eta_text":f"~{eta} min (est.)","route":None,"source":"euclidean_fallback"}
 
-@app.get("/geocode")
-async def geocode(address: str):
-    async with httpx.AsyncClient(timeout=6) as c:
-        r=await c.get(f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={MAPS_KEY}")
-        r.raise_for_status()
-    res=r.json().get("results",[])
-    if not res: raise HTTPException(404,"Not found")
-    loc=res[0]["geometry"]["location"]
-    return {"lat":loc["lat"],"lng":loc["lng"],"formatted":res[0]["formatted_address"]}
+    # Fallback — choose nearest by Euclidean distance
+    best = min(avail, key=lambda a: math.hypot((a["lat"] - req.case_lat) * 111, (a["lng"] - req.case_lng) * 111))
+    d = math.hypot((best["lat"] - req.case_lat) * 111, (best["lng"] - req.case_lng) * 111)
+    eta = max(3, round(d / 0.45))
+    best_amb = best
+    eta_sec = eta * 60
+    eta_text = f"~{eta} min (est.)"
+    try:
+        print("Updating case:", req.case_id)
+        db.collection("cases").document(req.case_id).update({
+            "dispatch": {
+                "ambulance_id": best_amb["id"],
+                "eta": eta_sec,
+                "assigned_at": datetime.utcnow().isoformat()
+            },
+            "status": "dispatched"
+        })
+        print("Case updated successfully")
+    except Exception as e:
+        print(f"[Firestore dispatch update] {e}")
 
-if __name__=="__main__":
-    import uvicorn
-    uvicorn.run(app,host="0.0.0.0",port=int(os.getenv("PORT",8080)))
+    return {"ok": True, "amb_id": best["id"], "eta_sec": eta_sec, "eta_text": eta_text, "route": None, "source": "euclidean_fallback"}
+@app.get("/case/{case_id}")
+def get_case(case_id: str):
+    doc = db.collection("cases").document(case_id).get()
+    if not doc.exists:
+        return {"error": "Case not found"}
+    return doc.to_dict()
+
+@app.post("/incident")
+def create_incident(incident: Incident):
+    case_ref = db.collection("cases").document()
+
+    data = {
+        "created_at": datetime.utcnow().isoformat(),
+        "status": "reported",
+        "description": incident.description,
+        "location": {
+            "lat": incident.lat,
+            "lng": incident.lng
+        }
+    }
+
+    case_ref.set(data)
+
+    print("Saved case:", case_ref.id)
+    print("Firestore project:", db.project)
+
+    return {
+        "success": True,
+        "case_id": case_ref.id
+    }
+@app.get("/debug")
+def debug():
+    docs = db.collection("cases").stream()
+
+    result = []
+    for d in docs:
+        item = d.to_dict()
+        item["id"] = d.id
+        result.append(item)
+
+    return result
+@app.get("/dbinfo")
+def dbinfo():
+    return {
+        "project": db.project,
+        "database": db._database_string
+    }       
