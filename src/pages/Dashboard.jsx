@@ -1,286 +1,939 @@
-import { useState, useEffect, useRef } from 'react';
-import { useCases, useAmbulances } from '../hooks/useFirebase';
-import { dispatchAmbulance } from '../services/api';
-import { sevColor, sevBg, relTime } from '../utils/helpers';
-import { useToast, ToastContainer } from '../components/Toast';
-import MapView from '../components/MapView';
-import Spinner from '../components/Spinner';
-
-const SIM_CASES = [
-  { title:'Drowning — Hindon River',    sev:'critical', score:89, kw:['drowning','unconscious'], lat:28.690, lng:77.320, mapX:180, mapY:58 },
-  { title:'Electrocution — site',       sev:'high',     score:73, kw:['electrocution'],          lat:28.627, lng:77.362, mapX:308, mapY:218 },
-  { title:'Snake bite — GT Road',       sev:'high',     score:66, kw:['snake bite'],              lat:28.590, lng:77.410, mapX:418, mapY:338 },
-  { title:'Building collapse — Noida',  sev:'critical', score:95, kw:['trapped','collapse'],      lat:28.610, lng:77.390, mapX:260, mapY:200 },
-];
+import { useState, useEffect } from "react";
+import { useCases, useAmbulances } from "../hooks/useFirebase";
+import { dispatchAmbulance } from "../services/api";
+import { sevColor, sevBg, relTime } from "../utils/helpers";
+import { useToast, ToastContainer } from "../components/Toast";
+import MapView from "../components/MapView";
+import Spinner from "../components/Spinner";
 
 export default function Dashboard({ user, onLogout }) {
-  const { cases, updateCase, removeCase, addCase } = useCases();
-  const { ambs,  updateAmb }                       = useAmbulances();
-  const { toasts, add: toast }                     = useToast();
+  const {
+    cases,
+    updateCase,
+    removeCase
+  } = useCases();
 
-  const [selId,       setSelId]       = useState(null);
-  const [filter,      setFilter]      = useState('all');
-  const [routePoly,   setRoutePoly]   = useState(null);
-  const [callModal,   setCallModal]   = useState(null);
-  const [callPhase,   setCallPhase]   = useState(null);
+  const {
+    ambs,
+    updateAmb
+  } = useAmbulances();
+
+  const {
+    toasts,
+    add: toast
+  } = useToast();
+
+  const [selId, setSelId] = useState(null);
+  const [filter, setFilter] = useState("active");
+  const [routePoly, setRoutePoly] = useState(null);
   const [dispatching, setDispatching] = useState(null);
-  const [clock,       setClock]       = useState(new Date());
-  const simRef = useRef(null);
+  const [callModal, setCallModal] = useState(null);
+  const [callPhase, setCallPhase] = useState(null);
+  const [clock, setClock] = useState(new Date());
 
-  // clock tick
-  useEffect(() => { const t = setInterval(() => setClock(new Date()), 1000); return () => clearInterval(t); }, []);
-
-  // simulate new SOS every 40 s (only once)
   useEffect(() => {
-    simRef.current = setInterval(() => {
-      const s = SIM_CASES[Math.floor(Math.random() * SIM_CASES.length)];
-      const nc = {
-        id:   'CB-' + Date.now().toString(36).toUpperCase(),
-        ...s, loc:'NCR Region', ai:`${s.kw.join(', ')} reported. Awaiting dispatch.`,
-        vision:[], status:'pending', amb:null, eta:null,
-        time:new Date().toISOString()
-      };
-      addCase(nc);
-      toast('🚨', 'New SOS received', `${nc.title} — Score ${nc.score}`, true);
-    }, 40000);
-    return () => clearInterval(simRef.current);
-  }, [addCase, toast]);
+    const timer = setInterval(() => {
+      setClock(new Date());
+    }, 1000);
 
-  // ── dispatch ───────────────────────────────────────────────────────────────
+    return () => clearInterval(timer);
+  }, []);
+
+  const displayName =
+    user?.name ||
+    user?.displayName ||
+    user?.email ||
+    "Dispatcher";
+    const selectedCase =
+  cases.find((c) => c.id === selId) || null;
+
+  // Check whether a case is completed
+const isResolvedCase = (c) => {
+  return (
+    c.status === "resolved" ||
+    c.status === "closed" ||
+    c.status === "completed"
+  );
+};
+
+// Active cases
+const activeCases = cases.filter(
+  (c) => !isResolvedCase(c)
+);
+console.log("Total:", cases.length);
+
+console.log(
+  "Active:",
+  activeCases.length,
+  activeCases
+);
+
+
+// History cases
+const historyCases = cases.filter(
+  (c) => isResolvedCase(c)
+);
+console.log(
+  "History:",
+  historyCases.length,
+  historyCases
+);
+
+// Queue filter
+const filteredCases = (() => {
+  switch (filter) {
+    case "active":
+      return activeCases;
+
+    case "critical":
+      return activeCases.filter(
+        (c) => c.sev === "critical"
+      );
+
+    case "pending":
+      return activeCases.filter(
+        (c) => c.status === "pending"
+      );
+
+    case "history":
+      return historyCases;
+
+    default:
+      return activeCases;
+  }
+})();
+
+// Dashboard counters
+const criticalCount = activeCases.filter(
+  (c) => c.sev === "critical"
+).length;
+
+const routedCount = activeCases.filter(
+  (c) => c.status === "routed"
+).length;
+
+const availableCount = ambs.filter(
+  (a) => !a.busy
+).length;
+
   async function handleDispatch(caseId) {
-    const c = cases.find(x => x.id === caseId); if (!c) return;
+    const incident = cases.find(c => c.id === caseId);
+
+    if (!incident) return;
+
     setDispatching(caseId);
-    const res = await dispatchAmbulance({ caseId, caseLat: c.lat||28.6353, caseLng: c.lng||77.39, ambulances: ambs });
-    setDispatching(null);
-    if (!res.ok) { toast('⚠️', 'No units available', res.error, true); return; }
-    const patch = { status:'routed', amb:res.amb_id, eta:res.eta_text };
-    updateCase(caseId, patch);
-    updateAmb(res.amb_id, { busy:true, assignedCase:caseId });
-    if (res.route?.polyline) setRoutePoly(res.route.polyline);
-    toast('🚑', `${res.amb_id} dispatched`, `ETA ${res.eta_text} · ${res.source}`, true);
-  }
 
-  // ── resolve ────────────────────────────────────────────────────────────────
-  async function handleResolve(caseId) {
-    const c = cases.find(x => x.id === caseId); if (!c) return;
-    updateCase(caseId, { status:'resolved' });
-    if (c.amb) updateAmb(c.amb, { busy:false, assignedCase:null });
-    setTimeout(() => removeCase(caseId), 800);
-    if (selId === caseId) setSelId(null);
-    toast('✓', 'Case resolved', caseId, false);
-  }
-
-  // ── call coordinator ───────────────────────────────────────────────────────
-  async function handleCall(c) {
-    setCallModal(c); setCallPhase('connecting');
-    // WebRTC call attempt
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
-      stream.getTracks().forEach(t => t.stop()); // just test mic access
-      setCallPhase('mock'); // backend not deployed: show mock
-    } catch {
-      setCallPhase('mock');
+      const result = await dispatchAmbulance({
+        caseId,
+        caseLat: incident.lat,
+        caseLng: incident.lng,
+        ambulances: ambs
+      });
+
+      if (!result.ok) {
+        toast(
+          "⚠️",
+          "Dispatch failed",
+          result.error,
+          true
+        );
+        return;
+      }
+
+      await updateCase(caseId, {
+        status: "routed",
+        amb: result.amb_id,
+        eta: result.eta_text
+      });
+
+      await updateAmb(result.amb_id, {
+        busy: true,
+        assignedCase: caseId
+      });
+
+      if (result.route?.polyline)
+        setRoutePoly(result.route.polyline);
+
+      toast(
+        "🚑",
+        "Ambulance Assigned",
+        `${result.amb_id} • ETA ${result.eta_text}`,
+        true
+      );
+    } finally {
+      setDispatching(null);
     }
   }
 
-  const sel     = cases.find(c => c.id === selId);
-  const shown   = cases.filter(c => {
-    if (filter === 'critical') return c.sev  === 'critical';
-    if (filter === 'pending')  return c.status === 'pending';
-    return true;
-  });
-  const crit    = cases.filter(c => c.sev === 'critical').length;
-  const routed  = cases.filter(c => c.status === 'routed').length;
-  const avail   = ambs.filter(a => !a.busy).length;
+  async function handleResolve(caseId) {
+    const incident = cases.find(c => c.id === caseId);
+
+    if (!incident) return;
+
+    await updateCase(caseId, {
+      status: "resolved"
+    });
+
+    if (incident.amb) {
+      await updateAmb(incident.amb, {
+        busy: false,
+        assignedCase: null
+      });
+    }
+
+    toast(
+      "✅",
+      "Incident Resolved",
+      incident.title,
+      false
+    );
+
+    if (selId === caseId) {
+      setSelId(null);
+    }
+
+  }
+
+  async function handleCall(incident) {
+    setCallModal(incident);
+    setCallPhase("connecting");
+
+    try {
+      const stream =
+        await navigator.mediaDevices.getUserMedia({
+          audio: true
+        });
+
+      stream.getTracks().forEach(track => track.stop());
+
+      setCallPhase("mock");
+    } catch {
+      setCallPhase("mock");
+    }
+  }
+
+  function closeCallModal() {
+    setCallModal(null);
+    setCallPhase(null);
+  }
 
   return (
-    <div style={{ height:'calc(100vh - 58px)', display:'flex', overflow:'hidden', color:'#EFEFEF' }}>
-      <ToastContainer toasts={toasts}/>
+    <div
+      style={{
+        height: "calc(100vh - 58px)",
+        display: "flex",
+        overflow: "hidden",
+        color: "#EFEFEF"
+      }}
+    >
+      <ToastContainer toasts={toasts} />
 
-      {/* ── SIDEBAR ──────────────────────────────────────────────────────── */}
-      <aside style={{ width:210, background:'#111', borderRight:'.5px solid rgba(255,255,255,.1)', display:'flex', flexDirection:'column', flexShrink:0 }}>
-        <div style={{ padding:'13px 16px 10px', borderBottom:'.5px solid rgba(255,255,255,.06)' }}>
-          <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:2, display:'flex', alignItems:'center', gap:8 }}>
-            <span style={{ width:7, height:7, borderRadius:'50%', background:'#E8281A', animation:'blink 1.3s infinite', display:'inline-block' }}/>
-            CRISIS<span style={{ color:'#E8281A' }}>BRAIN</span>
+      {/* ================= Sidebar ================= */}
+
+      <aside
+        style={{
+          width: 220,
+          background: "#111",
+          borderRight: ".5px solid rgba(255,255,255,.1)",
+          display: "flex",
+          flexDirection: "column"
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: ".5px solid rgba(255,255,255,.08)"
+          }}
+        >
+          <div
+            style={{
+              fontFamily: "'Bebas Neue',sans-serif",
+              fontSize: 20,
+              letterSpacing: 2
+            }}
+          >
+            CRISIS
+            <span style={{ color: "#E8281A" }}>
+              BRAIN
+            </span>
           </div>
-          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:8, color:'#333', marginTop:2, letterSpacing:1 }}>Firebase + Maps + Vision</div>
+
+          <div
+            style={{
+              color: "#555",
+              fontSize: 10,
+              marginTop: 4
+            }}
+          >
+            Firebase Live Dashboard
+          </div>
         </div>
 
-        <div style={{ padding:'10px 14px 9px', borderBottom:'.5px solid rgba(255,255,255,.06)', display:'flex', gap:9, alignItems:'center' }}>
-          <div style={{ width:28, height:28, borderRadius:'50%', background:'rgba(232,40,26,.14)', border:'.5px solid rgba(232,40,26,.3)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, color:'#E8281A', fontFamily:"'DM Mono',monospace", flexShrink:0 }}>
-            {user.name.split(' ').map(w=>w[0]).join('').slice(0,2)}
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            alignItems: "center",
+            padding: 15,
+            borderBottom:
+              ".5px solid rgba(255,255,255,.08)"
+          }}
+        >
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: "50%",
+              background: "#E8281A22",
+              color: "#E8281A",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontWeight: "bold"
+            }}
+          >
+            {displayName.charAt(0).toUpperCase()}
           </div>
+
           <div>
-            <div style={{ fontSize:11, fontWeight:500 }}>{user.name}</div>
-            <div style={{ fontSize:9, color:'#555', fontFamily:"'DM Mono',monospace" }}>{user.role.toUpperCase()}</div>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 600
+              }}
+            >
+              {displayName}
+            </div>
+
+            <div
+              style={{
+                fontSize: 10,
+                color: "#777"
+              }}
+            >
+              {user?.role?.toUpperCase()}
+            </div>
           </div>
         </div>
 
-        <nav style={{ flex:1, padding:'8px 7px' }}>
-          {[['🗺','Live Map',true,crit],['📋','Incidents',false,0],['🚑','Ambulances',false,0],['🧠','AI Log',false,0],['📊','Analytics',false,0]].map(([ic,lb,act,badge])=>(
-            <div key={lb} style={{ display:'flex', alignItems:'center', gap:9, padding:'8px 9px', borderRadius:7, cursor:'pointer', color:act?'#EFEFEF':'#666', fontSize:12, background:act?'rgba(232,40,26,.09)':'transparent', border:act?'.5px solid rgba(232,40,26,.18)':'.5px solid transparent', marginBottom:2 }}>
-              <span style={{ fontSize:12 }}>{ic}</span>{lb}
-              {badge>0&&<span style={{ marginLeft:'auto', background:'#E8281A', color:'#fff', fontSize:9, fontFamily:"'DM Mono',monospace", padding:'1px 6px', borderRadius:10 }}>{badge}</span>}
+        <nav
+          style={{
+            flex: 1,
+            padding: 12
+          }}
+        >
+          {[
+            ["🗺", "Live Map"],
+            ["📋", "Incidents"],
+            ["🚑", "Ambulances"],
+            ["🧠", "AI Logs"],
+            ["📊", "Analytics"]
+          ].map(([icon, title]) => (
+            <div
+              key={title}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 12px",
+                borderRadius: 8,
+                color: "#777",
+                cursor: "pointer"
+              }}
+            >
+              <span>{icon}</span>
+              {title}
             </div>
           ))}
         </nav>
 
-        <div style={{ padding:'8px 7px', borderTop:'.5px solid rgba(255,255,255,.06)' }}>
-          <div style={{ padding:'5px 9px', fontFamily:"'DM Mono',monospace", fontSize:8, color:'#333', lineHeight:1.8, marginBottom:4 }}>
-            Firebase: active<br/>Maps API: live<br/>Vision AI: active
-          </div>
-          <button onClick={onLogout} style={{ width:'100%', display:'flex', alignItems:'center', gap:9, padding:'8px 9px', borderRadius:7, cursor:'pointer', color:'#555', fontSize:12, background:'transparent', border:'none', fontFamily:"'DM Sans',sans-serif" }}>
-            ↩ Sign Out
-          </button>
-        </div>
+        <button
+          onClick={onLogout}
+          style={{
+            margin: 12,
+            padding: 10,
+            border: "none",
+            borderRadius: 8,
+            background: "#222",
+            color: "#ddd",
+            cursor: "pointer"
+          }}
+        >
+          Sign Out
+        </button>
       </aside>
 
-      {/* ── MAIN ─────────────────────────────────────────────────────────── */}
-      <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-        {/* TOPBAR */}
-        <div style={{ height:48, display:'flex', alignItems:'center', justifyContent:'space-between', padding:'0 18px', borderBottom:'.5px solid rgba(255,255,255,.1)', background:'#111', flexShrink:0 }}>
-          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#555', letterSpacing:.5 }}>
-            COMMAND CENTER · {clock.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+      {/* ================= Main ================= */}
+
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column"
+        }}
+      >
+        <div
+          style={{
+            height: 50,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "0 20px",
+            background: "#111",
+            borderBottom:
+              ".5px solid rgba(255,255,255,.08)"
+          }}
+        >
+          <div
+            style={{ 
+              color: "#666",
+              fontSize: 11
+            }}
+          >
+            COMMAND CENTER •{" "}
+            {clock.toLocaleTimeString()}
           </div>
-          <div style={{ display:'flex', gap:16, alignItems:'center' }}>
-            {[['ACTIVE',cases.length,'#EFEFEF'],['CRITICAL',crit,'#E24B4A'],['ROUTED',routed,'#3B82F6'],['FREE AMB',avail,'#22C55E']].map(([l,n,col])=>(
-              <div key={l} style={{ textAlign:'center' }}>
-                <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:20, color:col, lineHeight:1 }}>{n}</div>
-                <div style={{ fontSize:8, color:'#444', fontFamily:"'DM Mono',monospace", letterSpacing:.5 }}>{l}</div>
-              </div>
-            ))}
-            <div style={{ display:'flex', alignItems:'center', gap:5, fontSize:9, color:'#22C55E', fontFamily:"'DM Mono',monospace", border:'.5px solid rgba(34,197,94,.3)', padding:'3px 9px', borderRadius:20, background:'rgba(34,197,94,.05)' }}>
-              <span style={{ width:6,height:6,borderRadius:'50%',background:'#22C55E',animation:'blink 1.3s infinite',display:'inline-block' }}/> LIVE
-            </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: 25
+            }}
+          >
+            <Stat
+              label="ACTIVE"
+              value={activeCases.length}
+            />
+
+            <Stat
+              label="CRITICAL"
+              value={criticalCount}
+              color="#E8281A"
+            />
+
+            <Stat
+              label="ROUTED"
+              value={routedCount}
+              color="#3B82F6"
+            />
+
+            <Stat
+              label="FREE"
+              value={availableCount}
+              color="#22C55E"
+            />
           </div>
         </div>
 
-        <div style={{ flex:1, display:'grid', gridTemplateColumns:'320px 1fr', overflow:'hidden' }}>
-          {/* ── QUEUE ──────────────────────────────────────────────────── */}
-          <div style={{ borderRight:'.5px solid rgba(255,255,255,.09)', display:'flex', flexDirection:'column', overflow:'hidden' }}>
-            <div style={{ padding:'10px 13px', borderBottom:'.5px solid rgba(255,255,255,.07)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
-              <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:14, letterSpacing:1, color:'#666' }}>INCIDENT QUEUE</span>
-              <div style={{ display:'flex', gap:4 }}>
-                {['all','critical','pending'].map(f=>(
-                  <button key={f} onClick={()=>setFilter(f)} style={{ padding:'3px 8px', borderRadius:4, fontSize:9, fontFamily:"'DM Mono',monospace", cursor:'pointer', border:`.5px solid ${filter===f?'#E8281A':'rgba(255,255,255,.1)'}`, color:filter===f?'#E8281A':'#555', background:filter===f?'rgba(232,40,26,.08)':'transparent', textTransform:'uppercase', letterSpacing:.5 }}>{f}</button>
+        <div
+          style={{
+            flex: 1,
+            display: "grid",
+            gridTemplateColumns: "320px 1fr"
+          }}
+        >
+          {/* ================= Incident Queue ================= */}
+
+          <div
+  style={{
+    borderRight: ".5px solid rgba(255,255,255,.08)",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    minHeight: 0,
+    height: "100%"
+  }}
+>
+            <div
+              style={{
+                padding: "12px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                borderBottom: ".5px solid rgba(255,255,255,.08)"
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "'Bebas Neue',sans-serif",
+                  fontSize: 16,
+                  letterSpacing: 1
+                }}
+              >
+                INCIDENT QUEUE
+              </span>
+
+              <div style={{ display: "flex", gap: 6 }}>
+                {["active", "critical", "pending", "history"].map(type => (
+                  <button
+                    key={type}
+                    onClick={() => setFilter(type)}
+                    style={{
+                      padding: "4px 8px",
+                      borderRadius: 5,
+                      border:
+                        filter === type
+                          ? "1px solid #E8281A"
+                          : "1px solid #333",
+                      background:
+                        filter === type
+                          ? "#E8281A22"
+                          : "transparent",
+                      color:
+                        filter === type
+                          ? "#E8281A"
+                          : "#777",
+                      cursor: "pointer",
+                      fontSize: 10
+                    }}
+                  >
+                    {type.toUpperCase()}
+                  </button>
                 ))}
               </div>
             </div>
 
-            <div style={{ flex:1, overflowY:'auto' }}>
-              {shown.length === 0 && (
-                <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:160, color:'#333', gap:8 }}>
-                  <div style={{ fontSize:26, opacity:.4 }}>📡</div>
-                  <div style={{ fontSize:11, fontFamily:"'DM Mono',monospace" }}>No incidents</div>
+            <div
+  style={{
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    overflowX: "hidden",
+    WebkitOverflowScrolling: "touch"
+  }}
+>
+              {filteredCases.length === 0 && (
+                <div
+                  style={{
+                    height: 200,
+                    display: "flex",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    color: "#555"
+                  }}
+                >
+                  No Incidents
                 </div>
               )}
-              {shown.map(c => (
-                <div key={c.id} onClick={()=>setSelId(c.id)} style={{ padding:'10px 13px', borderBottom:'.5px solid rgba(255,255,255,.05)', cursor:'pointer', display:'flex', gap:8, alignItems:'flex-start', background:c.id===selId?'#1A1A1A':'transparent', borderLeft:`2px solid ${c.id===selId?sevColor(c.sev):'transparent'}`, transition:'background .1s' }}>
-                  <div style={{ width:34, height:34, borderRadius:7, background:sevBg(c.sev), color:sevColor(c.sev), display:'flex', alignItems:'center', justifyContent:'center', fontFamily:"'Bebas Neue',sans-serif", fontSize:14, flexShrink:0 }}>{c.score}</div>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', marginBottom:3 }}>{c.title}</div>
-                    <div style={{ fontSize:10, color:'#666', display:'flex', gap:6, flexWrap:'wrap' }}>
-                      <span style={{ background:sevBg(c.sev), color:sevColor(c.sev), padding:'1px 6px', borderRadius:20, fontFamily:"'DM Mono',monospace", fontSize:9 }}>{c.sev.toUpperCase()}</span>
-                      {c.amb && <span style={{ color:'#3B82F6' }}>● {c.amb}</span>}
+
+              {filteredCases.map(c => (
+                <div
+                  key={c.id}
+                  onClick={() => setSelId(c.id)}
+                  style={{
+                    display: "flex",
+                    gap: 10,
+                    padding: 12,
+                    cursor: "pointer",
+                    borderBottom:
+                      ".5px solid rgba(255,255,255,.05)",
+                    background:
+                      selId === c.id
+                        ? "#1A1A1A"
+                        : "transparent"
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 8,
+                      background: sevBg(c.sev),
+                      color: sevColor(c.sev),
+                      display: "flex",
+                      justifyContent: "center",
+                      alignItems: "center",
+                      fontWeight: "bold"
+                    }}
+                  >
+                    {c.score}
+                  </div>
+
+                  <div
+                    style={{
+                      flex: 1
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: 13
+                      }}
+                    >
+                      {c.title}
                     </div>
-                    <div style={{ height:3, background:'rgba(255,255,255,.07)', borderRadius:2, overflow:'hidden', marginTop:5 }}>
-                      <div style={{ height:'100%', width:`${c.score}%`, background:sevColor(c.sev), borderRadius:2 }}/>
+
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#777",
+                        marginTop: 2
+                      }}
+                    >
+                      {c.loc}
                     </div>
-                    <div style={{ fontSize:9, color:'#3a3a3a', fontFamily:"'DM Mono',monospace", marginTop:3 }}>{relTime(c.time)}</div>
+
+                    <div
+                      style={{
+                        marginTop: 5,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        fontSize: 10
+                      }}
+                    >
+                      <span
+                        style={{
+                          color: sevColor(c.sev)
+                        }}
+                      >
+                        {c.sev.toUpperCase()}
+                      </span>
+
+                      <span style={{ color: "#666" }}>
+                        {relTime(c.time)}
+                      </span>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* ── MAP + DETAIL ──────────────────────────────────────────── */}
-          <div style={{ display:'flex', flexDirection:'column', overflow:'hidden' }}>
-            {/* MAP */}
-            <div style={{ flex:1, overflow:'hidden' }}>
-              <MapView cases={shown} ambs={ambs} selectedId={selId} onSelect={setSelId} routePolyline={routePoly}/>
+          {/* ================= Map Panel ================= */}
+
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden"
+            }}
+          >
+            <div
+              style={{
+                flex: 1,
+                overflow: "hidden"
+              }}
+            >
+              <MapView
+                cases={filteredCases}
+                ambs={ambs}
+                selectedId={selId}
+                onSelect={setSelId}
+                routePolyline={routePoly}
+              />
             </div>
 
-            {/* DETAIL PANEL */}
-            <div style={{ height:200, borderTop:'.5px solid rgba(255,255,255,.09)', display:'flex', flexDirection:'column', flexShrink:0 }}>
-              <div style={{ padding:'8px 14px', borderBottom:'.5px solid rgba(255,255,255,.06)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
-                <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:13, letterSpacing:1, color:'#555' }}>INCIDENT DETAIL</span>
-                {sel && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'#E8281A' }}>{sel.id}</span>}
-              </div>
+            <div
+              style={{
+                height: 220,
+                borderTop:
+                  ".5px solid rgba(255,255,255,.08)",
+                overflowY: "auto",
+                padding: 15
+              }}
+            >
+              {selectedCase ? (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 18,
+                    height: "100%"
+                  }}
+                >
+                  {/* ================= AI Assessment ================= */}
 
-              <div style={{ flex:1, overflow:'auto', padding:'10px 14px' }}>
-                {!sel ? (
-                  <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%', color:'#333', fontSize:11, fontFamily:"'DM Mono',monospace" }}>← Select an incident from the queue</div>
-                ) : (
-                  <div style={{ display:'flex', gap:14, height:'100%' }}>
-                    {/* AI assessment */}
-                    <div style={{ flex:1, background:'#0f0f0f', borderRadius:8, padding:11, border:'.5px solid rgba(255,255,255,.07)', fontSize:11, color:'#777', lineHeight:1.7, overflowY:'auto' }}>
-                      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'#3a3a3a', letterSpacing:1, marginBottom:6 }}>AI TRIAGE ASSESSMENT</div>
-                      {sel.ai}
-                      <div style={{ marginTop:8, display:'flex', gap:5, flexWrap:'wrap' }}>
-                        {(sel.kw||[]).map(k=><span key={k} style={{ background:'rgba(232,40,26,.1)', color:'#E24B4A', padding:'1px 7px', borderRadius:20, fontSize:9, fontFamily:"'DM Mono',monospace" }}>{k}</span>)}
-                      </div>
-                      {sel.vision?.length>0 && <div style={{ marginTop:6, fontSize:10, color:'#555' }}>👁 Vision: {sel.vision.slice(0,3).join(', ')}</div>}
+                  <div
+                    style={{
+                      flex: 1,
+                      background: "#111",
+                      borderRadius: 8,
+                      padding: 14,
+                      border: ".5px solid rgba(255,255,255,.08)"
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#666",
+                        marginBottom: 10,
+                        fontFamily: "'DM Mono', monospace"
+                      }}
+                    >
+                      AI TRIAGE REPORT
                     </div>
 
-                    {/* Meta */}
-                    <div style={{ minWidth:152 }}>
-                      {[
-                        ['SCORE',   `${sel.score}/100`,          sevColor(sel.sev)],
-                        ['SEVERITY', sel.sev.toUpperCase(),      ''],
-                        ['STATUS',  sel.status.toUpperCase(),    ''],
-                        ['LOCATION', sel.loc?.slice(0,22)||'—',  ''],
-                        sel.amb ? ['UNIT', `${sel.amb}·${sel.eta}`, '#3B82F6'] : null
-                      ].filter(Boolean).map(([l,v,col])=>(
-                        <div key={l} style={{ display:'flex', justifyContent:'space-between', marginBottom:6, paddingBottom:6, borderBottom:'.5px solid rgba(255,255,255,.06)' }}>
-                          <span style={{ fontSize:9, color:'#555', fontFamily:"'DM Mono',monospace" }}>{l}</span>
-                          <span style={{ fontSize:10, fontWeight:500, color:col||'#EFEFEF' }}>{v}</span>
-                        </div>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "#DDD",
+                        lineHeight: 1.7
+                      }}
+                    >
+                      {selectedCase.ai}
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: 12,
+                        display: "flex",
+                        gap: 6,
+                        flexWrap: "wrap"
+                      }}
+                    >
+                      {(selectedCase.kw || []).map(keyword => (
+                        <span
+                          key={keyword}
+                          style={{
+                            padding: "3px 8px",
+                            borderRadius: 20,
+                            background: "#E8281A22",
+                            color: "#E8281A",
+                            fontSize: 10
+                          }}
+                        >
+                          {keyword}
+                        </span>
                       ))}
                     </div>
-
-                    {/* Actions */}
-                    <div style={{ display:'flex', flexDirection:'column', gap:6, minWidth:140 }}>
-                      {dispatching === sel.id ? (
-                        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 11px', border:'.5px solid rgba(255,255,255,.1)', borderRadius:7, fontSize:10, color:'#666' }}>
-                          <Spinner size={12}/> Dispatching…
-                        </div>
-                      ) : !sel.amb ? (
-                        <Btn col="#E8281A" onClick={()=>handleDispatch(sel.id)}>🚑 DISPATCH UNIT</Btn>
-                      ) : (
-                        <Btn col="#22C55E" disabled>✓ DISPATCHED</Btn>
-                      )}
-                      <Btn col="#3B82F6" onClick={()=>handleCall(sel)}>📞 CALL COORDINATOR</Btn>
-                      <Btn onClick={()=>handleResolve(sel.id)}>✓ Mark Resolved</Btn>
-                      {sel.hasImage && <Btn>🖼 View Photo</Btn>}
-                    </div>
                   </div>
-                )}
-              </div>
+
+                  {/* ================= Information ================= */}
+
+                  <div
+                    style={{
+                      width: 180
+                    }}
+                  >
+                    <InfoRow
+                      label="Score"
+                      value={selectedCase.score}
+                      color={sevColor(selectedCase.sev)}
+                    />
+
+                    <InfoRow
+                      label="Severity"
+                      value={selectedCase.sev.toUpperCase()}
+                    />
+
+                    <InfoRow
+                      label="Status"
+                      value={selectedCase.status.toUpperCase()}
+                    />
+
+                    <InfoRow
+                      label="Location"
+                      value={selectedCase.loc}
+                    />
+
+                    {selectedCase.amb && (
+                      <InfoRow
+                        label="Ambulance"
+                        value={selectedCase.amb}
+                        color="#3B82F6"
+                      />
+                    )}
+
+                    {selectedCase.eta && (
+                      <InfoRow
+                        label="ETA"
+                        value={selectedCase.eta}
+                        color="#22C55E"
+                      />
+                    )}
+                  </div>
+
+                  {/* ================= Actions ================= */}
+
+                  <div
+                    style={{
+                      width: 170,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 10
+                    }}
+                  >
+                    {dispatching === selectedCase.id ? (
+                      <div
+                        style={{
+                          padding: 12,
+                          border: ".5px solid #333",
+                          borderRadius: 8,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8
+                        }}
+                      >
+                        <Spinner size={14} />
+                        Dispatching...
+                      </div>
+                    ) : selectedCase.amb ? (
+                      <Btn
+                        col="#22C55E"
+                        disabled
+                      >
+                        ✓ ASSIGNED
+                      </Btn>
+                    ) : (
+                      <Btn
+                        col="#E8281A"
+                        onClick={() =>
+                          handleDispatch(selectedCase.id)
+                        }
+                      >
+                        🚑 DISPATCH
+                      </Btn>
+                    )}
+
+                    <Btn
+                      col="#3B82F6"
+                      onClick={() =>
+                        handleCall(selectedCase)
+                      }
+                    >
+                      📞 CALL
+                    </Btn>
+
+                    <Btn
+                      col="#22C55E"
+                      onClick={() =>
+                        handleResolve(selectedCase.id)
+                      }
+                    >
+                      ✓ RESOLVE
+                    </Btn>
+
+                    {selectedCase.lat &&
+                      selectedCase.lng && (
+                        <Btn
+                          col="#F59E0B"
+                          onClick={() =>
+                            window.open(
+                              `https://maps.google.com/?daddr=${selectedCase.lat},${selectedCase.lng}`
+                            )
+                          }
+                        >
+                          🗺 OPEN MAP
+                        </Btn>
+                      )}
+                  </div>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    height: "100%",
+                    display: "flex",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    color: "#666",
+                    fontSize: 14
+                  }}
+                >
+                  Select an incident from the queue.
+                </div>
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* ── CALL MODAL ───────────────────────────────────────────────────── */}
+      {/* ================= CALL MODAL ================= */}
+
       {callModal && (
-        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.8)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:500, backdropFilter:'blur(4px)' }} onClick={e=>e.target===e.currentTarget&&(setCallModal(null),setCallPhase(null))}>
-          <div style={{ background:'#141414', border:'.5px solid rgba(255,255,255,.12)', borderRadius:14, padding:36, textAlign:'center', maxWidth:360, width:'92%', animation:'fadeUp .3s ease' }}>
-            <div style={{ fontSize:44, marginBottom:14 }}>{callPhase==='connected'?'📞':'☎️'}</div>
-            <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:26, letterSpacing:2, color:callPhase==='connected'?'#22C55E':'#F59E0B' }}>
-              {callPhase==='connecting'?'CONNECTING…':callPhase==='connected'?'CALL LIVE':'MOCK CALL ACTIVE'}
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              closeCallModal();
+            }
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.8)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 999
+          }}
+        >
+          <div
+            style={{
+              width: 360,
+              background: "#141414",
+              borderRadius: 12,
+              padding: 30,
+              border: ".5px solid rgba(255,255,255,.1)",
+              textAlign: "center"
+            }}
+          >
+            <div
+              style={{
+                fontSize: 48,
+                marginBottom: 20
+              }}
+            >
+              📞
             </div>
-            <div style={{ color:'#666', fontSize:13, marginTop:8, lineHeight:1.7 }}>
-              {callPhase==='mock' && `Free WebRTC call system.\nBoth dispatcher + ambulance must have app open.\nCase: ${callModal.id}`}
-              {callPhase==='connecting' && 'Establishing connection…'}
+
+            <div
+              style={{
+                fontSize: 24,
+                fontFamily: "'Bebas Neue',sans-serif",
+                letterSpacing: 2,
+                color: "#F59E0B"
+              }}
+            >
+              {callPhase === "connecting"
+                ? "CONNECTING..."
+                : "VOICE CHANNEL"}
             </div>
-            {callPhase==='mock' && (
-              <div style={{ margin:'14px 0', padding:11, background:'rgba(245,158,11,.07)', border:'.5px solid rgba(245,158,11,.25)', borderRadius:7, fontSize:10, color:'#F59E0B', fontFamily:"'DM Mono',monospace", textAlign:'left' }}>
-                WebRTC peer-to-peer audio<br/>Uses Google STUN (free)<br/>Deploy backend for full call routing
+
+            <div
+              style={{
+                marginTop: 12,
+                color: "#777",
+                lineHeight: 1.6,
+                fontSize: 13
+              }}
+            >
+              {callPhase === "connecting" ? (
+                <>Requesting microphone access for {callModal.title}...</>
+              ) : (
+                <>
+                  Mock voice channel open with{" "}
+                  {callModal.title} ({callModal.loc}).
+                  <br />
+                  No live audio backend is connected yet.
+                </>
+              )}
+            </div>
+
+            {callPhase === "connecting" && (
+              <div
+                style={{
+                  marginTop: 20,
+                  display: "flex",
+                  justifyContent: "center"
+                }}
+              >
+                <Spinner size={20} />
               </div>
             )}
-            <button onClick={()=>{setCallModal(null);setCallPhase(null);}} style={{ marginTop:14, background:callPhase==='connected'?'#E8281A':'#2a2a2a', color:'#fff', border:'none', fontFamily:"'Bebas Neue',sans-serif", fontSize:15, letterSpacing:2, padding:'10px 28px', borderRadius:7, cursor:'pointer' }}>
-              {callPhase==='connected'?'END CALL':'CLOSE'}
+
+            <button
+              onClick={closeCallModal}
+              style={{
+                marginTop: 24,
+                padding: "10px 20px",
+                border: "none",
+                borderRadius: 8,
+                background: "#222",
+                color: "#ddd",
+                cursor: "pointer",
+                fontSize: 12
+              }}
+            >
+              END CALL
             </button>
           </div>
         </div>
@@ -289,9 +942,66 @@ export default function Dashboard({ user, onLogout }) {
   );
 }
 
-function Btn({ children, onClick, col, disabled }) {
+function Stat({ label, value, color = "#AAA" }) {
   return (
-    <button onClick={onClick} disabled={disabled} style={{ padding:'8px 11px', borderRadius:7, fontSize:10, fontFamily:"'DM Mono',monospace", cursor:disabled?'default':'pointer', border:`.5px solid ${col||'rgba(255,255,255,.12)'}`, color:disabled?'#22C55E':col||'#666', background:col&&!disabled?`${col}14`:'transparent', letterSpacing:.5, transition:'all .15s' }}>
+    <div style={{ textAlign: "right" }}>
+      <div
+        style={{
+          fontSize: 16,
+          fontWeight: 700,
+          color
+        }}
+      >
+        {value}
+      </div>
+
+      <div
+        style={{
+          fontSize: 9,
+          color: "#555",
+          letterSpacing: 1
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value, color = "#DDD" }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        padding: "8px 0",
+        borderBottom: ".5px solid rgba(255,255,255,.06)",
+        fontSize: 12
+      }}
+    >
+      <span style={{ color: "#777" }}>{label}</span>
+      <span style={{ color, fontWeight: 600 }}>{value}</span>
+    </div>
+  );
+}
+
+function Btn({ col, onClick, disabled, children }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: 12,
+        border: `.5px solid ${col}55`,
+        borderRadius: 8,
+        background: disabled ? `${col}22` : `${col}15`,
+        color: col,
+        cursor: disabled ? "default" : "pointer",
+        fontWeight: 600,
+        fontSize: 12,
+        opacity: disabled ? 0.8 : 1
+      }}
+    >
       {children}
     </button>
   );

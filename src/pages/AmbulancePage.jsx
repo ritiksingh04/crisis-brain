@@ -10,11 +10,28 @@ export default function AmbulancePage({ user, onLogout }) {
   const [status, setStatus] = useState('available');
   const [callPhase, setCallPhase] = useState(null);
 
-  const myAmb  = ambs.find(a => a.id === 'AMB-1') || ambs[0];
-  const myCase = myAmb ? cases.find(c => c.amb === myAmb.id) : null;
+  const ambulanceId = user?.ambulanceId || "AMB-1";
+  const myAmb = ambs.find(a => a.id === ambulanceId);
+  const myCase = myAmb
+    ? cases.find(
+        c =>
+          c.assignedAmbulance === myAmb.id &&
+          c.status !== "resolved"
+      )
+    : null;
 
   const SC = { available:'#22C55E', dispatched:'#F59E0B', on_scene:'#3B82F6', returning:'#777' };
 
+  const pendingCases = cases.filter(
+    c =>
+        c.status === "pending" &&
+        !c.assignedAmbulance
+);
+
+const queue = [...cases]
+    .filter(c => c.status === "pending")
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
   useEffect(() => {
     if (myAmb) setStatus(myAmb.busy ? 'dispatched' : 'available');
   }, [myAmb?.busy]);
@@ -31,12 +48,46 @@ export default function AmbulancePage({ user, onLogout }) {
       if (myAmb) await AmbService.update(myAmb.id, { busy:false, assignedCase:null });
     }
   }
+  
+  async function markEnRoute() {
+    setStatus("en_route");
 
+    await CaseService.update(myCase.id, {
+        status: "en_route"
+    });
+} 
   async function handleCall() {
     setCallPhase('connecting');
     setTimeout(() => setCallPhase('mock'), 1200);
   }
+ 
+  async function acceptMission(c) {
+    await CaseService.update(c.id, {
+        status: "assigned",
+        assignedAmbulance: myAmb.id,
+        assignedTeam: myAmb.team
+    });
 
+    await AmbService.update(myAmb.id, {
+        busy: true,
+        assignedCase: c.id
+    });
+
+    setStatus("dispatched");
+}
+useEffect(() => {
+    if (!myAmb) return;
+
+    const watch = navigator.geolocation.watchPosition(pos => {
+        AmbService.update(myAmb.id, {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            updatedAt: new Date().toISOString()
+        });
+    });
+
+    return () => navigator.geolocation.clearWatch(watch);
+}, [myAmb]);
   return (
     <div style={{ maxWidth:520, margin:'0 auto', padding:'26px 18px', minHeight:'calc(100vh - 58px)', color:'#EFEFEF' }}>
 
@@ -113,14 +164,31 @@ export default function AmbulancePage({ user, onLogout }) {
       {/* Live queue top 5 */}
       <div style={{ background:'#141414', border:'.5px solid rgba(255,255,255,.1)', borderRadius:12, overflow:'hidden' }}>
         <div style={{ padding:'10px 14px', borderBottom:'.5px solid rgba(255,255,255,.06)', fontFamily:"'Bebas Neue',sans-serif", fontSize:13, letterSpacing:1, color:'#555' }}>LIVE QUEUE — TOP 5</div>
-        {cases.slice(0,5).map(c=>(
+        {queue.map(c=>(
           <div key={c.id} style={{ padding:'9px 14px', borderBottom:'.5px solid rgba(255,255,255,.05)', display:'flex', gap:9, alignItems:'center' }}>
             <div style={{ width:30, height:30, borderRadius:6, background:sevBg(c.sev), color:sevColor(c.sev), display:'flex', alignItems:'center', justifyContent:'center', fontFamily:"'Bebas Neue',sans-serif", fontSize:12, flexShrink:0 }}>{c.score}</div>
             <div style={{ flex:1, minWidth:0 }}>
               <div style={{ fontSize:12, fontWeight:500, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{c.title}</div>
               <div style={{ fontSize:10, color:'#555' }}>{c.loc?.slice(0,30)}</div>
+              {!c.assignedAmbulance && (
+  <button
+    onClick={() => acceptMission(c)}
+    style={{
+      marginTop:8,
+      padding:"6px 12px",
+      border:"none",
+      borderRadius:6,
+      background:"#22C55E",
+      color:"#fff",
+      cursor:"pointer",
+      fontSize:11
+    }}
+  >
+    Accept Mission
+  </button>
+)}
             </div>
-            <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:c.amb?'#3B82F6':'#3a3a3a' }}>{c.status.toUpperCase()}</div>
+            <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:c.assignedAmbulance ? '#3B82F6' : '#3a3a3a' }}>{c.status.toUpperCase()}</div>
           </div>
         ))}
       </div>

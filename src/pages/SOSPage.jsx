@@ -78,9 +78,15 @@ export default function SOSPage() {
     };
 
     let id;
-    try { id = await CaseService.add(caseData); }
-    catch { id = genId(); }
 
+try {
+  id = await CaseService.add(caseData);
+} catch (err) {
+  console.error("Firestore add failed:", err);
+  setErr("Unable to save case to Firestore.");
+  setPhase("form");
+  return;
+}
     setResult({ id, triage }); setPhase('success');
   }
 
